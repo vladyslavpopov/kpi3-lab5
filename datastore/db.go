@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 const DefaultMaxSegmentSize = 10 * 1024 * 1024
@@ -30,6 +31,14 @@ type Db struct {
 	outOffset    int64
 	segmentIndex int
 	index        hashIndex
+	mu           sync.RWMutex
+	writeCh      chan writeRequest
+}
+
+type writeRequest struct {
+	key   string
+	value string
+	done  chan error
 }
 
 func Open(dir string) (*Db, error) {
@@ -84,6 +93,9 @@ func Open(dir string) (*Db, error) {
 		return nil, err
 	}
 
+	db.writeCh = make(chan writeRequest)
+	go db.runWriter()
+
 	return db, nil
 }
 
@@ -108,39 +120,53 @@ func (db *Db) recoverFile(path string) error {
 		if err != nil {
 			return fmt.Errorf("recoverFile, decode error: %w", err)
 		}
+		db.mu.Lock()
 		db.index[rec.key] = filePos{fileName: path, offset: offset}
+		db.mu.Unlock()
 		offset += int64(n)
 	}
 	return nil
 }
 
-func (db *Db) Put(key, value string) error {
-	e := entry{
-		key:   key,
-		value: value,
-	}
-	b := e.Encode()
-	toWrite := int64(len(b))
-	if db.outOffset+toWrite > MaxSegmentSize {
-		if err := db.rotateSegment(); err != nil {
-			return fmt.Errorf("Put: rotateSegment failed: %w", err)
+func (db *Db) runWriter() {
+	for req := range db.writeCh {
+		e := entry{key: req.key, value: req.value}
+		b := e.Encode()
+		toWrite := int64(len(b))
+
+		if db.outOffset+toWrite > MaxSegmentSize {
+			if err := db.rotateSegment(); err != nil {
+				req.done <- err
+				continue
+			}
 		}
+
+		n, err := db.out.Write(b)
+		if err != nil {
+			req.done <- err
+			continue
+		}
+
+		currFile := filepath.Join(db.dir, outFileName)
+		db.mu.Lock()
+		db.index[req.key] = filePos{fileName: currFile, offset: db.outOffset}
+		db.mu.Unlock()
+		db.outOffset += int64(n)
+
+		req.done <- nil
 	}
+}
 
-	n, err := db.out.Write(b)
-	if err != nil {
-		return err
-	}
-
-	currFileName := filepath.Join(db.dir, outFileName)
-	db.index[key] = filePos{fileName: currFileName, offset: db.outOffset}
-
-	db.outOffset += int64(n)
-	return nil
+func (db *Db) Put(key, value string) error {
+	done := make(chan error)
+	db.writeCh <- writeRequest{key: key, value: value, done: done}
+	return <-done
 }
 
 func (db *Db) Get(key string) (string, error) {
+	db.mu.RLock()
 	pos, ok := db.index[key]
+	db.mu.RUnlock()
 	if !ok {
 		return "", ErrNotFound
 	}
@@ -171,6 +197,7 @@ func (db *Db) Size() (int64, error) {
 }
 
 func (db *Db) Close() error {
+	close(db.writeCh)
 	return db.out.Close()
 }
 
@@ -192,7 +219,6 @@ func (db *Db) rotateSegment() error {
 		return err
 	}
 	db.out = f
-
 	db.outOffset = 0
 	return nil
 }
