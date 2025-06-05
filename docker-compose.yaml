@@ -17,6 +17,8 @@ services:
       - servers
     ports:
       - "8080:8080"
+    environment:
+      - CONF_RESPONSE_DELAY_SEC=3
 
   server2:
     build: .
@@ -24,6 +26,8 @@ services:
       - servers
     ports:
       - "8081:8080"
+    environment:
+      - CONF_RESPONSE_DELAY_SEC=3
 
   server3:
     build: .
@@ -31,3 +35,5 @@ services:
       - servers
     ports:
       - "8082:8080"
+    environment:
+      - CONF_RESPONSE_DELAY_SEC=3
