@@ -1,32 +1,92 @@
 package integration
 
 import (
-	"fmt"
-	"net/http"
-	"os"
-	"testing"
-	"time"
+  "bufio"
+  "net/http"
+  "sync"
+  "testing"
+  "time"
 )
 
-const baseAddress = "http://balancer:8090"
+const (
+  balancerURL       = "http://balancer:8090/api/v1/some-data"
+  totalRequests     = 30
+  concurrentWorkers = 10
+)
 
-var client = http.Client{
-	Timeout: 3 * time.Second,
+func collectHeaders(t *testing.T, n int) []string {
+  var wg sync.WaitGroup
+  chResults := make(chan string, n)
+
+  worker := func() {
+    defer wg.Done()
+    resp, err := http.Get(balancerURL)
+    if err != nil {
+      t.Errorf("відповідь від балансувальника: %v", err)
+      return
+    }
+    defer resp.Body.Close()
+
+    lbFrom := resp.Header.Get("lb-from")
+    if lbFrom == "" {
+      t.Errorf("заголовок lb-from відсутній у відповіді")
+      return
+    }
+    chResults <- lbFrom
+    scanner := bufio.NewScanner(resp.Body)
+    for scanner.Scan() {
+    }
+  }
+
+  sem := make(chan struct{}, concurrentWorkers)
+
+  for i := 0; i < n; i++ {
+    wg.Add(1)
+    sem <- struct{}{}
+    go func() {
+      defer func() { <-sem }()
+      worker()
+    }()
+  }
+
+  wg.Wait()
+  close(chResults)
+
+  results := make([]string, 0, n)
+  for src := range chResults {
+    results = append(results, src)
+  }
+  return results
 }
 
-func TestBalancer(t *testing.T) {
-	if _, exists := os.LookupEnv("INTEGRATION_TEST"); !exists {
-		t.Skip("Integration test is not enabled")
-	}
+func TestBalancedDistribution(t *testing.T) {
 
-	// TODO: Реалізуйте інтеграційний тест для балансувальникка.
-	resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data", baseAddress))
-	if err != nil {
-		t.Error(err)
-	}
-	t.Logf("response from [%s]", resp.Header.Get("lb-from"))
-}
+  time.Sleep(5 * time.Second)
 
-func BenchmarkBalancer(b *testing.B) {
-	// TODO: Реалізуйте інтеграційний бенчмарк для балансувальникка.
+  headers := collectHeaders(t, totalRequests)
+  if len(headers) != totalRequests {
+    t.Fatalf("замість %d отримаємо %d lb-from значень", totalRequests, len(headers))
+  }
+
+  counts := make(map[string]int)
+  for _, src := range headers {
+    counts[src]++
+  }
+
+  expectedServers := []string{"server1:8080", "server2:8080", "server3:8080"}
+  for _, srv := range expectedServers {
+    if counts[srv] == 0 {
+      t.Errorf("очікували, що хоча б один запит піде до %s, а отримали 0", srv)
+    }
+  }
+
+  avg := totalRequests / len(expectedServers)
+  maxAllowed := avg + 2
+  for _, srv := range expectedServers {
+    if counts[srv] > maxAllowed {
+      t.Errorf("%s отримав %d запитів, що більше за допустимий ліміт %d", srv, counts[srv], maxAllowed)
+    }
+  }
+
+  t.Logf("Розподіл запитів: %+v", counts)
 }
