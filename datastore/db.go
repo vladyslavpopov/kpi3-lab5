@@ -36,9 +36,10 @@ type Db struct {
 }
 
 type writeRequest struct {
-	key   string
-	value string
-	done  chan error
+	key      string
+	value    string
+	isDelete bool
+	done     chan error
 }
 
 func Open(dir string) (*Db, error) {
@@ -120,9 +121,15 @@ func (db *Db) recoverFile(path string) error {
 		if err != nil {
 			return fmt.Errorf("recoverFile, decode error: %w", err)
 		}
+
 		db.mu.Lock()
-		db.index[rec.key] = filePos{fileName: path, offset: offset}
+		if rec.value == "" {
+			delete(db.index, rec.key)
+		} else {
+			db.index[rec.key] = filePos{fileName: path, offset: offset}
+		}
 		db.mu.Unlock()
+
 		offset += int64(n)
 	}
 	return nil
@@ -149,17 +156,27 @@ func (db *Db) runWriter() {
 
 		currFile := filepath.Join(db.dir, outFileName)
 		db.mu.Lock()
-		db.index[req.key] = filePos{fileName: currFile, offset: db.outOffset}
+		if req.isDelete {
+			delete(db.index, req.key)
+		} else {
+			db.index[req.key] = filePos{fileName: currFile, offset: db.outOffset}
+		}
 		db.mu.Unlock()
-		db.outOffset += int64(n)
 
+		db.outOffset += int64(n)
 		req.done <- nil
 	}
 }
 
 func (db *Db) Put(key, value string) error {
 	done := make(chan error)
-	db.writeCh <- writeRequest{key: key, value: value, done: done}
+	db.writeCh <- writeRequest{key: key, value: value, isDelete: false, done: done}
+	return <-done
+}
+
+func (db *Db) Delete(key string) error {
+	done := make(chan error)
+	db.writeCh <- writeRequest{key: key, value: "", isDelete: true, done: done}
 	return <-done
 }
 
@@ -184,6 +201,9 @@ func (db *Db) Get(key string) (string, error) {
 	var rec entry
 	if _, err := rec.DecodeFromReader(bufio.NewReader(f)); err != nil {
 		return "", err
+	}
+	if rec.value == "" {
+		return "", ErrNotFound
 	}
 	return rec.value, nil
 }
