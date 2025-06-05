@@ -5,6 +5,17 @@ networks:
 
 services:
 
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile.db
+    networks:
+      - servers
+    ports:
+      - "8083:8083"
+    volumes:
+      - dbdata:/app/data
+
   server1:
     build: .
     networks:
@@ -13,6 +24,8 @@ services:
       - "8080:8080"
     environment:
       - CONF_RESPONSE_DELAY_SEC=0
+    depends_on:
+      - db
 
   server2:
     build: .
@@ -22,6 +35,8 @@ services:
       - "8081:8080"
     environment:
       - CONF_RESPONSE_DELAY_SEC=0
+    depends_on:
+      - db
 
   server3:
     build: .
@@ -31,6 +46,8 @@ services:
       - "8082:8080"
     environment:
       - CONF_RESPONSE_DELAY_SEC=0
+    depends_on:
+      - db
 
   balancer:
     build: .
@@ -59,3 +76,5 @@ services:
       - GO111MODULE=on
     command: ["go", "test", "-v", "./integration", "-timeout=60s"]
 
+volumes:
+  dbdata:
