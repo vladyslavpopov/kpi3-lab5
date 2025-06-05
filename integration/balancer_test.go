@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	balancerURL       = "http://localhost:8090/api/v1/some-data"
+	balancerURL       = "http://balancer:8090/api/v1/some-data"
 	totalRequests     = 30
 	concurrentWorkers = 10
 )
