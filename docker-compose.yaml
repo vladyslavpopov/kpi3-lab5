@@ -5,7 +5,7 @@ services:
 
   balancer:
     build: .
-    command: "lb"
+    command: ["lb", "--trace=true", "--timeout-sec=5"]
     networks:
       - servers
     ports:
