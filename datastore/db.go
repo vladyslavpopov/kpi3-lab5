@@ -9,89 +9,109 @@ import (
 	"path/filepath"
 )
 
+const DefaultMaxSegmentSize = 10 * 1024 * 1024
+
+var MaxSegmentSize int64 = DefaultMaxSegmentSize
+
 const outFileName = "current-data"
 
 var ErrNotFound = fmt.Errorf("record does not exist")
 
-type hashIndex map[string]int64
+type filePos struct {
+	fileName string
+	offset   int64
+}
+
+type hashIndex map[string]filePos
 
 type Db struct {
-	out       *os.File
-	outOffset int64
-
-	index hashIndex
+	dir          string
+	out          *os.File
+	outOffset    int64
+	segmentIndex int
+	index        hashIndex
 }
 
 func Open(dir string) (*Db, error) {
-	outputPath := filepath.Join(dir, outFileName)
-	f, err := os.OpenFile(outputPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+
+	db := &Db{
+		dir:   dir,
+		index: make(hashIndex),
+	}
+
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	db := &Db{
-		out:   f,
-		index: make(hashIndex),
+	maxIdx := -1
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		var idx int
+		if n, _ := fmt.Sscanf(entry.Name(), "seg_%d.dat", &idx); n == 1 && idx > maxIdx {
+			maxIdx = idx
+		}
 	}
-	err = db.recover()
-	if err != nil && err != io.EOF {
+	db.segmentIndex = maxIdx + 1
+
+	currPath := filepath.Join(dir, outFileName)
+	f, err := os.OpenFile(currPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
 		return nil, err
 	}
+	db.out = f
+
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	db.outOffset = info.Size()
+
+	for i := 0; i <= maxIdx; i++ {
+		segName := filepath.Join(dir, fmt.Sprintf("seg_%d.dat", i))
+		if err := db.recoverFile(segName); err != nil && err != io.EOF {
+			f.Close()
+			return nil, err
+		}
+	}
+	if err := db.recoverFile(currPath); err != nil && err != io.EOF {
+		f.Close()
+		return nil, err
+	}
+
 	return db, nil
 }
 
-func (db *Db) recover() error {
-	f, err := os.Open(db.out.Name())
+func (db *Db) recoverFile(path string) error {
+	f, err := os.Open(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
 	defer f.Close()
 
 	in := bufio.NewReader(f)
-	for err == nil {
-		var (
-			record entry
-			n      int
-		)
-		n, err = record.DecodeFromReader(in)
+	var offset int64 = 0
+	for {
+		var rec entry
+		n, err := rec.DecodeFromReader(in)
 		if errors.Is(err, io.EOF) {
-			if n != 0 {
-				return fmt.Errorf("corrupted file")
-			}
 			break
 		}
-
-		db.index[record.key] = db.outOffset
-		db.outOffset += int64(n)
+		if err != nil {
+			return fmt.Errorf("recoverFile, decode error: %w", err)
+		}
+		db.index[rec.key] = filePos{fileName: path, offset: offset}
+		offset += int64(n)
 	}
-	return err
-}
-
-func (db *Db) Close() error {
-	return db.out.Close()
-}
-
-func (db *Db) Get(key string) (string, error) {
-	position, ok := db.index[key]
-	if !ok {
-		return "", ErrNotFound
-	}
-
-	file, err := os.Open(db.out.Name())
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	_, err = file.Seek(position, 0)
-	if err != nil {
-		return "", err
-	}
-
-	var record entry
-	if _, err = record.DecodeFromReader(bufio.NewReader(file)); err != nil {
-		return "", err
-	}
-	return record.value, nil
+	return nil
 }
 
 func (db *Db) Put(key, value string) error {
@@ -99,12 +119,47 @@ func (db *Db) Put(key, value string) error {
 		key:   key,
 		value: value,
 	}
-	n, err := db.out.Write(e.Encode())
-	if err == nil {
-		db.index[key] = db.outOffset
-		db.outOffset += int64(n)
+	b := e.Encode()
+	toWrite := int64(len(b))
+	if db.outOffset+toWrite > MaxSegmentSize {
+		if err := db.rotateSegment(); err != nil {
+			return fmt.Errorf("Put: rotateSegment failed: %w", err)
+		}
 	}
-	return err
+
+	n, err := db.out.Write(b)
+	if err != nil {
+		return err
+	}
+
+	currFileName := filepath.Join(db.dir, outFileName)
+	db.index[key] = filePos{fileName: currFileName, offset: db.outOffset}
+
+	db.outOffset += int64(n)
+	return nil
+}
+
+func (db *Db) Get(key string) (string, error) {
+	pos, ok := db.index[key]
+	if !ok {
+		return "", ErrNotFound
+	}
+
+	f, err := os.Open(pos.fileName)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(pos.offset, io.SeekStart); err != nil {
+		return "", err
+	}
+
+	var rec entry
+	if _, err := rec.DecodeFromReader(bufio.NewReader(f)); err != nil {
+		return "", err
+	}
+	return rec.value, nil
 }
 
 func (db *Db) Size() (int64, error) {
@@ -113,4 +168,31 @@ func (db *Db) Size() (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+
+func (db *Db) Close() error {
+	return db.out.Close()
+}
+
+func (db *Db) rotateSegment() error {
+	if err := db.out.Close(); err != nil {
+		return err
+	}
+
+	oldPath := filepath.Join(db.dir, outFileName)
+	newPath := filepath.Join(db.dir, fmt.Sprintf("seg_%d.dat", db.segmentIndex))
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return err
+	}
+
+	db.segmentIndex++
+
+	f, err := os.OpenFile(oldPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	db.out = f
+
+	db.outOffset = 0
+	return nil
 }
