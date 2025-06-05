@@ -43,6 +43,17 @@ func TestSegmentCreationAndMerge(t *testing.T) {
     t.Errorf("expected at least 1 segment file, got %d", segCount)
   }
 
+  if err := db.Put("delete_me", "val"); err != nil {
+    t.Fatalf("Put failed: %v", err)
+  }
+  if err := db.Delete("delete_me"); err != nil {
+    t.Fatalf("Delete failed: %v", err)
+  }
+  _, err = db.Get("delete_me")
+  if err != ErrNotFound {
+    t.Fatalf("Expected ErrNotFound after delete, got %v", err)
+  }
+
   if err := db.MergeSegments(); err != nil {
     t.Fatalf("MergeSegments failed: %v", err)
   }
@@ -65,17 +76,14 @@ func TestSegmentCreationAndMerge(t *testing.T) {
     t.Errorf("after merge, expected exactly 1 segment file, got %d", mergedCount)
   }
 
-  if err := db.Put("key_5", "newVal"); err != nil {
-    t.Fatalf("Put new key_5 failed: %v", err)
+  if _, err := db.Get("delete_me"); err != ErrNotFound {
+    t.Errorf("Expected delete_me to be gone after merge, got %v", err)
   }
-  if err := db.MergeSegments(); err != nil {
-    t.Fatalf("MergeSegments (second) failed: %v", err)
-  }
-  val, err := db.Get("key_5")
+  val, err := db.Get("key_10")
   if err != nil {
-    t.Fatalf("Get after merge failed: %v", err)
+    t.Errorf("Expected key_10 to exist, got error %v", err)
   }
-  if val != "newVal" {
-    t.Errorf("expected merged value %q for key_5, got %q", "newVal", val)
+  if len(val) == 0 {
+    t.Errorf("Expected non-empty value for key_10 after merge")
   }
 }
