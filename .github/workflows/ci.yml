@@ -1,53 +1,29 @@
-name: CI
+name: CI Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v3
-
-      - name: Setup Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.24'
 
       - name: Install Docker Compose
         run: |
           sudo apt-get update
           sudo apt-get install -y docker-compose
 
-      - name: Build Docker images (unit tests inside)
+      - name: Build images & run all tests via Docker Compose
         run: |
-          docker-compose build
-
-      - name: Docker Compose Up
-        run: |
-          docker-compose up -d
-
-      - name: Wait for balancer to be ready
-        run: |
-          for i in {1..30}; do
-            if curl -s http://localhost:8090/health; then
-              echo "Balancer is up!"
-              break
-            fi
-            echo "Waiting for balancer ($i/30)…"
-            sleep 2
-          done
-
-      - name: Run integration tests
-        run: |
-          go test -v ./integration
+          docker-compose -f docker-compose.yaml -f docker-compose.test.yaml up --build --exit-code-from test
 
       - name: Tear down Docker Compose
         if: always()
         run: |
-          docker-compose down
+          docker-compose -f docker-compose.yaml -f docker-compose.test.yaml down --volumes --remove-orphans
