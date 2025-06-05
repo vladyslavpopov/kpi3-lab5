@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24'
+
+      - name: Install Docker Compose
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker-compose
+
+      - name: Docker Compose Build (unit tests внутри Dockerfile)
+        run: |
+          # перейдём в корень репозитория, где лежит docker-compose.yaml
+          docker-compose build
+
+      - name: Docker Compose Up
+        run: |
+          docker-compose up -d
+
+      - name: Wait for Balancer to be healthy
+        run: |
+          # Пробуем опрашивать localhost:8090 в течение ~60 секунд 
+          for i in {1..30}; do
+            if curl -s http://localhost:8090/health; then
+              echo "Balancer is up!"
+              break
+            fi
+            echo "Waiting for balancer... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run Integration Tests
+        run: |
+          go test -v ./integration
